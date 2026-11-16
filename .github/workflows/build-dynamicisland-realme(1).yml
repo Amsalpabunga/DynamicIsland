@@ -1,0 +1,117 @@
+name: Build DynamicIsland Realme
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "*.zip"
+      - ".github/workflows/build-dynamicisland-realme.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select newest patch ZIP
+        id: source
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re, zipfile
+          from pathlib import Path
+
+          candidates = []
+          for path in Path(".").glob("*.zip"):
+              try:
+                  with zipfile.ZipFile(path) as z:
+                      names = [n.rstrip("/") for n in z.namelist()]
+                      roots = set()
+                      for name in names:
+                          parts = name.split("/")
+                          for i in range(len(parts)):
+                              prefix = "/".join(parts[:i])
+                              gradle = (prefix + "/" if prefix else "") + "gradlew"
+                              app_gradle = (prefix + "/" if prefix else "") + "app/build.gradle"
+                              app_kts = (prefix + "/" if prefix else "") + "app/build.gradle.kts"
+                              if gradle in names and (app_gradle in names or app_kts in names):
+                                  roots.add(prefix)
+                      if not roots:
+                          continue
+                      root = sorted(roots, key=len)[0]
+                      match = re.search(r"fix[-_ ]?(\d+)", path.name.lower())
+                      fix_version = int(match.group(1)) if match else 0
+                      priority = 1 if re.search(r"fix|patch", path.name, re.I) else 0
+                      candidates.append((priority, fix_version, path.stat().st_mtime, path.name, root))
+              except (zipfile.BadZipFile, OSError):
+                  continue
+
+          if not candidates:
+              raise SystemExit("Tidak ditemukan ZIP source di root repository yang berisi gradlew dan app/build.gradle(.kts).")
+
+          candidates.sort(reverse=True)
+          chosen = candidates[0]
+          print(f"Selected: {chosen[3]} (fix{chosen[1]}, root={chosen[4] or '.'})")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"zip={chosen[3]}\\n")
+              f.write(f"root={chosen[4]}\\n")
+          PY
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Extract source
+        shell: bash
+        run: |
+          mkdir -p source
+          python3 - <<'PY'
+          import os, zipfile
+          from pathlib import Path
+          archive = Path(os.environ["ZIP_FILE"])
+          root = os.environ.get("SOURCE_ROOT", "")
+          with zipfile.ZipFile(archive) as z:
+              prefix = root + "/" if root else ""
+              for item in z.infolist():
+                  name = item.filename
+                  if not name.startswith(prefix):
+                      continue
+                  relative = name[len(prefix):]
+                  if not relative:
+                      continue
+                  target = Path("source") / relative
+                  if item.is_dir():
+                      target.mkdir(parents=True, exist_ok=True)
+                  else:
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      with z.open(item) as src, target.open("wb") as dst:
+                          dst.write(src.read())
+          PY
+        env:
+          ZIP_FILE: ${{ steps.source.outputs.zip }}
+          SOURCE_ROOT: ${{ steps.source.outputs.root }}
+
+      - name: Build release APK
+        working-directory: source
+        shell: bash
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DynamicIsland-Realme-release
+          path: |
+            source/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
