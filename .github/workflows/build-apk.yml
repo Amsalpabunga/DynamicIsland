@@ -1,0 +1,39 @@
+name: Build patched Dynamic Island APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract project ZIP
+        run: |
+          ZIP_FILE=$(find . -maxdepth 1 -name '*.zip' | head -n 1)
+          mkdir project
+          unzip -q "$ZIP_FILE" -d project
+          echo "PROJECT_DIR=$(find project -mindepth 1 -maxdepth 1 -type d | head -n 1)" >> "$GITHUB_ENV"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Build APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DynamicIsland-0.1.17-dev3-LockScreen
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
