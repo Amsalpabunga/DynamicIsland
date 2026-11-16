@@ -1,0 +1,155 @@
+name: Build DynamicIsland Realme Patch
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dynamicisland-realme-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Find newest source ZIP automatically
+        id: source
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import os
+          import subprocess
+          import zipfile
+          from pathlib import Path
+
+          candidates = []
+
+          for archive in Path(".").glob("*.zip"):
+              try:
+                  with zipfile.ZipFile(archive) as zf:
+                      names = set(zf.namelist())
+
+                      roots = set()
+                      for name in names:
+                          if name.endswith("/gradlew"):
+                              roots.add(name[:-len("/gradlew")].rstrip("/"))
+                          elif name == "gradlew":
+                              roots.add("")
+
+                      valid_root = None
+                      for root in roots:
+                          gradle_file = f"{root}/app/build.gradle" if root else "app/build.gradle"
+                          if gradle_file in names:
+                              valid_root = root
+                              break
+
+                      if valid_root is None:
+                          continue
+
+                      # Reject unsafe archive paths before extraction.
+                      unsafe = any(
+                          name.startswith("/") or ".." in Path(name).parts
+                          for name in names
+                      )
+                      if unsafe:
+                          print(f"Skipping unsafe ZIP: {archive}")
+                          continue
+
+                  result = subprocess.run(
+                      ["git", "log", "-1", "--format=%ct", "--", str(archive)],
+                      capture_output=True, text=True, check=False
+                  )
+                  committed = int(result.stdout.strip() or "0")
+                  candidates.append((committed, archive.name, valid_root))
+
+              except (zipfile.BadZipFile, OSError) as exc:
+                  print(f"Skipping {archive}: {exc}")
+
+          if not candidates:
+              raise SystemExit(
+                  "No source ZIP found at repository root. "
+                  "The ZIP must contain a gradlew file and app/build.gradle."
+              )
+
+          committed, filename, root = max(candidates)
+          print(f"Selected source archive: {filename}")
+          print(f"Project folder inside ZIP: {root or '(ZIP root)'}")
+
+          os.makedirs("project", exist_ok=True)
+          with zipfile.ZipFile(filename) as zf:
+              zf.extractall("project")
+
+          project_dir = f"project/{root}" if root else "project"
+          if not (Path(project_dir) / "gradlew").is_file():
+              raise SystemExit(f"Gradle wrapper not found in {project_dir}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"project_dir={project_dir}\n")
+              output.write(f"source_zip={filename}\n")
+          PY
+
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          set -e
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "${ANDROID_HOME}" -type f -name sdkmanager 2>/dev/null | head -n 1)"
+          fi
+          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "sdkmanager was not found in ANDROID_HOME=${ANDROID_HOME}" >&2
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Build release APK
+        env:
+          PROJECT_DIR: ${{ steps.source.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          chmod +x gradlew
+          ./gradlew --no-daemon clean assembleRelease
+
+          APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          if [ ! -f "$APK" ]; then
+            echo "Expected APK was not produced: $APK" >&2
+            find app/build/outputs -maxdepth 5 -type f -print || true
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/build-output"
+          cp "$APK" "$GITHUB_WORKSPACE/build-output/DynamicIsland-Realme-EventPatch-unsigned.apk"
+          cd "$GITHUB_WORKSPACE"
+          sha256sum build-output/DynamicIsland-Realme-EventPatch-unsigned.apk \
+            > build-output/SHA256SUMS.txt
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DynamicIsland-Realme-EventPatch-${{ github.run_number }}
+          path: |
+            build-output/DynamicIsland-Realme-EventPatch-unsigned.apk
+            build-output/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
