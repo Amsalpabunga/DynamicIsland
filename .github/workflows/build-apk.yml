@@ -22,7 +22,7 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
-      - uses: android-actions/setup-android@v4
+      - uses: android-actions/setup-android@v3
       - name: Install Android SDK
         run: |
           yes | sdkmanager --licenses >/dev/null || true
@@ -34,6 +34,6 @@ jobs:
           ./gradlew --no-daemon assembleRelease
       - uses: actions/upload-artifact@v4
         with:
-          name: DynamicIsland-0.1.17-dev3-Realme-EventPatch-source-fix1
+          name: DynamicIsland-0.1.17-dev3-LockScreen
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
